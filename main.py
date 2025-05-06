@@ -5,7 +5,10 @@ import os
 app = FastAPI()
 
 INFAKT_API_TOKEN = os.environ["INFAKT_API_TOKEN"]
-INFAKT_API_URL = "https://api.infakt.pl/v3/invoices.json"
+INFAKT_HEADERS = {
+    "X-inFakt-ApiKey": INFAKT_API_TOKEN,
+    "Content-Type": "application/json"
+}
 
 @app.post("/shopify")
 async def handle_shopify_order(request: Request):
@@ -14,57 +17,81 @@ async def handle_shopify_order(request: Request):
     print(order)
 
     try:
-        client_name = order["customer"]["first_name"] + " " + order["customer"]["last_name"]
-        client_email = order["email"]
-        client_address = order["billing_address"]
-        client_street = client_address["address1"]
-        client_postcode = client_address["zip"]
-        client_city = client_address["city"]
-        client_country = client_address["country"]
+        email = order["email"]
+        customer = order["customer"]
+        billing = order["billing_address"]
+        client_name = f'{customer["first_name"]} {customer["last_name"]}'
 
-        invoice_positions = []
+        # 🔍 Szukamy klienta po e-mailu
+        async with httpx.AsyncClient() as client:
+            client_search = await client.get(
+                f"https://api.infakt.pl/v3/clients.json?email={email}",
+                headers=INFAKT_HEADERS
+            )
+
+        clients = client_search.json()
+        if clients:
+            client_id = clients[0]["id"]
+        else:
+            # ➕ Tworzymy nowego klienta
+            client_payload = {
+                "client": {
+                    "name": client_name,
+                    "email": email,
+                    "street": billing["address1"],
+                    "post_code": billing["zip"],
+                    "city": billing["city"],
+                    "country": billing["country"]
+                }
+            }
+            async with httpx.AsyncClient() as client:
+                res = await client.post(
+                    "https://api.infakt.pl/v3/clients.json",
+                    headers=INFAKT_HEADERS,
+                    json=client_payload
+                )
+                new_client = res.json()
+                client_id = new_client["id"]
+
+        # 🧾 Przygotowanie pozycji faktury
+        positions = []
         for item in order["line_items"]:
-            invoice_positions.append({
+            positions.append({
                 "name": item["name"],
                 "quantity": item["quantity"],
                 "unit_price_gross": float(item["price"]),
                 "tax": "23"
             })
 
-        payload = {
+        invoice_payload = {
             "invoice": {
-                "client_name": client_name,
-                "client_email": client_email,
-                "client_street": client_street,
-                "client_post_code": client_postcode,
-                "client_city": client_city,
-                "client_country": client_country,
+                "client_id": client_id,
                 "invoice_date": order["created_at"][:10],
                 "payment_to": order["created_at"][:10],
                 "invoice_tax": "23",
                 "kind": "vat",
-                "positions": invoice_positions
+                "positions": positions
             }
         }
 
-        headers = {
-            "X-inFakt-ApiKey": INFAKT_API_TOKEN,
-            "Content-Type": "application/json"
-        }
-
         async with httpx.AsyncClient() as client:
-            response = await client.post(INFAKT_API_URL, headers=headers, json=payload)
+            invoice_res = await client.post(
+                "https://api.infakt.pl/v3/invoices.json",
+                headers=INFAKT_HEADERS,
+                json=invoice_payload
+            )
 
         print(">>> ODPOWIEDŹ INFAKT:")
-        print(response.status_code)
-        print(response.text)
+        print(invoice_res.status_code)
+        print(invoice_res.text)
 
-        if response.status_code == 201:
+        if invoice_res.status_code == 201:
             return {"status": "success"}
         else:
-            return {"status": "error", "details": response.text}
+            return {"status": "error", "details": invoice_res.text}
+
     except Exception as e:
-        print(">>> BŁĄD W APLIKACJI:")
+        print(">>> BŁĄD:")
         print(str(e))
         return {"status": "error", "details": str(e)}
 
