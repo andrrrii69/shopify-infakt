@@ -5,7 +5,7 @@ import os
 
 app = FastAPI()
 
-INFAKT_API_TOKEN = os.environ["1ba92c4f516f2f7756fff26722ee9f93be5ec1eb"]
+INFAKT_API_TOKEN = os.environ["INFAKT_API_TOKEN"]
 INFAKT_API_URL = "https://api.infakt.pl/v3/invoices.json"
 
 @app.post("/shopify")
