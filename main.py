@@ -1,70 +1,63 @@
+# main.py
 import os
+import logging
 from fastapi import FastAPI, Request
-from pydantic import BaseModel
 import requests
 
 app = FastAPI()
+logging.basicConfig(level=logging.INFO)
 
-INFAKT_TOKEN = os.getenv("INFAKT_TOKEN")
-INFAKT_API_URL = "https://api.infakt.pl/v3/clients.json"
-
-class Customer(BaseModel):
-    email: str
-    first_name: str
-    last_name: str
-    city: str
-    street: str
-    zip: str
-
-def find_client_by_email(email: str):
-    headers = {"X-inFakt-ApiKey": INFAKT_TOKEN}
-    response = requests.get(INFAKT_API_URL, headers=headers)
-    if response.status_code == 200:
-        clients = response.json()
-        for client in clients:
-            if client.get("client", {}).get("email") == email:
-                return client["client"]["id"]
-    return None
-
-def create_client(customer: Customer):
-    headers = {
-        "X-inFakt-ApiKey": INFAKT_TOKEN,
-        "Content-Type": "application/json"
-    }
-    data = {
-        "client": {
-            "first_name": customer.first_name,
-            "last_name": customer.last_name,
-            "email": customer.email,
-            "street": customer.street,
-            "city": customer.city,
-            "zip_code": customer.zip
-        }
-    }
-    response = requests.post(INFAKT_API_URL, json=data, headers=headers)
-    return response.json()
+INFAKT_TOKEN = os.getenv("INFAKT_API_TOKEN")
+INFAKT_HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Authorization": f"Bearer {INFAKT_TOKEN}",
+}
 
 @app.post("/shopify")
-async def shopify_webhook(request: Request):
-    order = await request.json()
+async def shopify_webhook(req: Request):
+    order = await req.json()
     email = order["email"]
-    first_name = order["billing_address"]["first_name"]
-    last_name = order["billing_address"]["last_name"]
-    city = order["billing_address"]["city"]
-    street = order["billing_address"]["address1"]
-    zip_code = order["billing_address"]["zip"]
+    logging.info(f"Received order #{order['order_number']} from {email}")
 
-    customer = Customer(
-        email=email,
-        first_name=first_name,
-        last_name=last_name,
-        city=city,
-        street=street,
-        zip=zip_code
-    )
+    # 1) Zawsze twórz klienta
+    client_payload = {
+        "client": {
+            "name": order["billing_address"]["name"],
+            "email": email,
+            "addresses": [{
+                "street": order["billing_address"]["address1"],
+                "zip": order["billing_address"]["zip"],
+                "city": order["billing_address"]["city"],
+                "country": order["billing_address"]["country_code"],
+            }]
+        }
+    }
+    r = requests.post("https://api.infakt.pl/v3/clients.json", json=client_payload, headers=INFAKT_HEADERS)
+    r.raise_for_status()
+    client_id = r.json()["client"]["id"]
+    logging.info(f"Created client id={client_id}")
 
-    client_id = find_client_by_email(email)
-    if not client_id:
-        result = create_client(customer)
-        return {"status": "created", "result": result}
-    return {"status": "exists", "client_id": client_id}
+    # 2) Twórz fakturę
+    lines = []
+    for item in order["line_items"]:
+        lines.append({
+            "name": item["title"],
+            "quantity": item["quantity"],
+            "price_net": item["price"],
+            "tax": 0,
+        })
+    invoice_payload = {
+        "invoice": {
+            "kind": "income",
+            "client_id": client_id,
+            "issue_date": order["created_at"][:10],
+            "lines": lines
+        }
+    }
+    r = requests.post("https://api.infakt.pl/v3/invoices.json", json=invoice_payload, headers=INFAKT_HEADERS)
+    r.raise_for_status()
+    inv = r.json()["invoice"]
+    logging.info(f"Invoice created id={inv['id']} nr={inv['full_number']}")
+
+    return {"status": "ok"}
