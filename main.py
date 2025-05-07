@@ -1,50 +1,70 @@
-import requests
+import os
 from fastapi import FastAPI, Request
+from pydantic import BaseModel
+import requests
 
 app = FastAPI()
 
-INFAKT_HEADERS = {
-    "X-inFakt-ApiKey": "TWÓJ_KLUCZ_API",
-    "Content-Type": "application/json"
-}
+INFAKT_TOKEN = os.getenv("INFAKT_TOKEN")
+INFAKT_API_URL = "https://api.infakt.pl/v3/clients.json"
 
-def find_client_by_email(email):
-    response = requests.get(
-        f"https://api.infakt.pl/v3/clients.json?email={email}",
-        headers=INFAKT_HEADERS
-    )
-    clients = response.json()
-    if clients:
-        return clients[0]["id"]
+class Customer(BaseModel):
+    email: str
+    first_name: str
+    last_name: str
+    city: str
+    street: str
+    zip: str
+
+def find_client_by_email(email: str):
+    headers = {"X-inFakt-ApiKey": INFAKT_TOKEN}
+    response = requests.get(INFAKT_API_URL, headers=headers)
+    if response.status_code == 200:
+        clients = response.json()
+        for client in clients:
+            if client.get("client", {}).get("email") == email:
+                return client["client"]["id"]
     return None
 
-def create_client(email, name):
+def create_client(customer: Customer):
+    headers = {
+        "X-inFakt-ApiKey": INFAKT_TOKEN,
+        "Content-Type": "application/json"
+    }
     data = {
         "client": {
-            "email": email,
-            "name": name,
-            "company_name": "",  # wcześniej było: None
-            "country": "PL",
+            "first_name": customer.first_name,
+            "last_name": customer.last_name,
+            "email": customer.email,
+            "street": customer.street,
+            "city": customer.city,
+            "zip_code": customer.zip
         }
     }
-    response = requests.post(
-        "https://api.infakt.pl/v3/clients.json",
-        json=data,
-        headers=INFAKT_HEADERS
-    )
-    response.raise_for_status()
-    return response.json()["id"]
+    response = requests.post(INFAKT_API_URL, json=data, headers=headers)
+    return response.json()
 
 @app.post("/shopify")
 async def shopify_webhook(request: Request):
-    payload = await request.json()
-    email = payload["email"]
-    name = payload["shipping_address"]["first_name"] + " " + payload["shipping_address"]["last_name"]
+    order = await request.json()
+    email = order["email"]
+    first_name = order["billing_address"]["first_name"]
+    last_name = order["billing_address"]["last_name"]
+    city = order["billing_address"]["city"]
+    street = order["billing_address"]["address1"]
+    zip_code = order["billing_address"]["zip"]
+
+    customer = Customer(
+        email=email,
+        first_name=first_name,
+        last_name=last_name,
+        city=city,
+        street=street,
+        zip=zip_code
+    )
 
     client_id = find_client_by_email(email)
     if not client_id:
-        client_id = create_client(email, name)
-
-    print(f"Utworzony / znaleziony klient ID: {client_id}")
-    return {"status": "ok"}
-
+        result = create_client(customer)
+        return {"status": "created", "result": result}
+    return {"status": "exists", "client_id": client_id}
