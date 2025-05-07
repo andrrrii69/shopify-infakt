@@ -1,57 +1,82 @@
-
 import os
-import requests
 from fastapi import FastAPI, Request
+import requests
+
+app = FastAPI()
 
 INFAKT_API_URL = "https://api.infakt.pl/v3/clients.json"
 INFAKT_TOKEN = os.getenv("INFAKT_TOKEN")
 
-app = FastAPI()
-
 def find_client_by_email(email: str):
-    headers = {"X-inFakt-ApiKey": INFAKT_TOKEN}
-    response = requests.get(INFAKT_API_URL, headers=headers)
-    response.raise_for_status()
-    clients = response.json()
-    for client in clients:
-        if isinstance(client, dict) and client.get("client", {}).get("email") == email:
-            return client["client"]["id"]
-    return None
-
-def create_client_in_infakt(email: str, customer: dict, address: dict):
     headers = {
         "X-inFakt-ApiKey": INFAKT_TOKEN,
         "Content-Type": "application/json",
     }
-    client_data = {
+    response = requests.get("https://api.infakt.pl/v3/clients.json", headers=headers)
+    if response.status_code != 200:
+        return None
+    clients = response.json()
+    for client in clients:
+        if isinstance(client, dict) and client.get("client", {}).get("email") == email:
+            return client.get("client", {}).get("id")
+    return None
+
+def create_client(data: dict):
+    headers = {
+        "X-inFakt-ApiKey": INFAKT_TOKEN,
+        "Content-Type": "application/json",
+    }
+
+    payload = {
         "client": {
-            "email": email,
-            "first_name": customer.get("first_name", ""),
-            "last_name": customer.get("last_name", ""),
-            "phone": customer.get("phone", ""),
-            "street": address.get("address1", ""),
-            "city": address.get("city", ""),
-            "postal_code": address.get("zip", ""),
-            "country": address.get("country", ""),
-            "client_type": "private_person"
+            "email": data["email"],
+            "phone": data.get("phone"),
+            "name": f'{data["first_name"]} {data["last_name"]}',
+            "street": data.get("street"),
+            "city": data.get("city"),
+            "postal_code": data.get("zip"),
+            "country": data.get("country"),
+            "company": False,
+            "person": True
         }
     }
-    response = requests.post(INFAKT_API_URL, headers=headers, json=client_data)
+
+    response = requests.post(INFAKT_API_URL, headers=headers, json=payload)
     if response.status_code == 201:
-        return response.json()["id"]
-    print("Błąd tworzenia klienta:", response.text)
-    return None
+        return response.json().get("client", {}).get("id")
+    else:
+        print("Błąd tworzenia klienta:", response.text)
+        return None
 
 @app.post("/shopify")
 async def shopify_webhook(request: Request):
-    data = await request.json()
+    order = await request.json()
     print(">>> ODEBRANE ZAMÓWIENIE:")
-    print(data)
-    email = data.get("email")
-    customer = data.get("customer", {})
-    address = data.get("shipping_address", {})
+    print(order)
+
+    email = order.get("email")
+    first_name = order.get("billing_address", {}).get("first_name")
+    last_name = order.get("billing_address", {}).get("last_name")
+    street = order.get("billing_address", {}).get("address1")
+    city = order.get("billing_address", {}).get("city")
+    zip_code = order.get("billing_address", {}).get("zip")
+    phone = order.get("billing_address", {}).get("phone")
+    country = order.get("billing_address", {}).get("country")
 
     client_id = find_client_by_email(email)
-    if not client_id:
-        client_id = create_client_in_infakt(email, customer, address)
-    return {"client_id": client_id}
+    if client_id:
+        print(f"Klient już istnieje w inFakt (ID: {client_id})")
+    else:
+        client_id = create_client({
+            "email": email,
+            "first_name": first_name,
+            "last_name": last_name,
+            "street": street,
+            "city": city,
+            "zip": zip_code,
+            "phone": phone,
+            "country": country,
+        })
+        print(f"Utworzono nowego klienta w inFakt (ID: {client_id})" if client_id else "Nie udało się utworzyć klienta.")
+
+    return {"ok": True}
