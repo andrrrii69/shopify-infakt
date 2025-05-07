@@ -1,11 +1,10 @@
 services:
   - type: web
-    name: shopify-infakt
-    env: python
-    buildCommand: ""
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    name: shopify-infakt-sync
+    runtime: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port 10000"
     envVars:
-      - key: INFAKT_API_TOKEN
-        value: 1ba92c4f516f2f7756fff26722ee9f93be5ec1eb
-
-
+      - key: INFAKT_TOKEN
+        sync: false
+    plan: free

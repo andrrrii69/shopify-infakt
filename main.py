@@ -1,76 +1,70 @@
 import os
-import requests
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-
-INFAKT_API_TOKEN = os.environ["INFAKT_API_TOKEN"]
+from pydantic import BaseModel
+import requests
 
 app = FastAPI()
 
-@app.post("/shopify")
-async def handle_shopify_order(request: Request):
-    data = await request.json()
-    print(">>> ODEBRANE ZAMÓWIENIE:")
-    print(data)
+INFAKT_TOKEN = os.getenv("INFAKT_TOKEN")
+INFAKT_API_URL = "https://api.infakt.pl/v3/clients.json"
 
-    # Przygotowanie danych klienta
-    customer = data.get("customer", {})
-    email = customer.get("email")
+class Customer(BaseModel):
+    email: str
+    first_name: str
+    last_name: str
+    city: str
+    street: str
+    zip: str
 
-    if not email:
-        return JSONResponse(content={"error": "Brak adresu email klienta"}, status_code=400)
+def find_client_by_email(email: str):
+    headers = {"X-inFakt-ApiKey": INFAKT_TOKEN}
+    response = requests.get(INFAKT_API_URL, headers=headers)
+    if response.status_code == 200:
+        clients = response.json()
+        for client in clients:
+            if client.get("client", {}).get("email") == email:
+                return client["client"]["id"]
+    return None
 
+def create_client(customer: Customer):
     headers = {
-        "Authorization": f"Bearer {INFAKT_API_TOKEN}",
+        "X-inFakt-ApiKey": INFAKT_TOKEN,
         "Content-Type": "application/json"
     }
-
-    # 1. Szukanie klienta
-    client_search = requests.get(f"https://api.infakt.pl/v3/clients.json?email={email}", headers=headers)
-    print(">>> ODPOWIEDŹ Z INFAKT (szukanie klienta):", client_search.status_code, client_search.text)
-
-    client_id = None
-    if client_search.status_code == 200 and client_search.json():
-        client_id = client_search.json()[0]["id"]
-    else:
-        # 2. Próba stworzenia klienta
-        client_data = {
-            "email": email,
-            "first_name": customer.get("first_name", ""),
-            "last_name": customer.get("last_name", ""),
-            "street": data.get("billing_address", {}).get("address1", ""),
-            "city": data.get("billing_address", {}).get("city", ""),
-            "postal_code": data.get("billing_address", {}).get("zip", ""),
-            "country": data.get("billing_address", {}).get("country", ""),
+    data = {
+        "client": {
+            "first_name": customer.first_name,
+            "last_name": customer.last_name,
+            "email": customer.email,
+            "street": customer.street,
+            "city": customer.city,
+            "zip_code": customer.zip
         }
-
-        res = requests.post("https://api.infakt.pl/v3/clients.json", headers=headers, json=client_data)
-        print(">>> ODPOWIEDŹ Z INFAKT (tworzenie klienta):", res.status_code, res.text)
-
-        if res.status_code == 201:
-            client_id = res.json()["id"]
-        else:
-            return JSONResponse(content={"error": "Nie udało się utworzyć klienta", "infakt_response": res.text}, status_code=422)
-
-    # 3. Tworzenie faktury
-    invoice_data = {
-        "client_id": client_id,
-        "kind": "vat",
-        "payment_method": "cash",
-        "invoice_contents": [
-            {
-                "name": item["title"],
-                "price": item["price"],
-                "quantity": item["quantity"]
-            } for item in data.get("line_items", [])
-        ]
     }
+    response = requests.post(INFAKT_API_URL, json=data, headers=headers)
+    return response.json()
 
-    invoice_res = requests.post("https://api.infakt.pl/v3/invoices.json", headers=headers, json=invoice_data)
-    print(">>> ODPOWIEDŹ INFAKT (tworzenie faktury):", invoice_res.status_code, invoice_res.text)
+@app.post("/shopify")
+async def shopify_webhook(request: Request):
+    order = await request.json()
+    email = order["email"]
+    first_name = order["billing_address"]["first_name"]
+    last_name = order["billing_address"]["last_name"]
+    city = order["billing_address"]["city"]
+    street = order["billing_address"]["address1"]
+    zip_code = order["billing_address"]["zip"]
 
-    if invoice_res.status_code != 201:
-        return JSONResponse(content={"error": "Nie udało się utworzyć faktury", "infakt_response": invoice_res.text}, status_code=422)
+    customer = Customer(
+        email=email,
+        first_name=first_name,
+        last_name=last_name,
+        city=city,
+        street=street,
+        zip=zip_code
+    )
 
-    return JSONResponse(content={"status": "OK", "invoice_id": invoice_res.json()["id"]})
-
+    client_id = find_client_by_email(email)
+    if not client_id:
+        result = create_client(customer)
+        return {"status": "created", "result": result}
+    return {"status": "exists", "client_id": client_id}
