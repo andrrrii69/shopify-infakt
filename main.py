@@ -3,59 +3,55 @@ import os
 import requests
 from fastapi import FastAPI, Request
 
+INFAKT_API_URL = "https://api.infakt.pl/v3/clients.json"
+INFAKT_TOKEN = os.getenv("INFAKT_TOKEN")
+
 app = FastAPI()
 
-INFAKT_TOKEN = os.getenv("INFAKT_TOKEN")
-INFAKT_API_URL = "https://api.infakt.pl/v3/clients.json"
-HEADERS = {"X-inFakt-ApiKey": INFAKT_TOKEN}
-
-
-def find_client_by_email(email):
-    response = requests.get(INFAKT_API_URL, headers=HEADERS)
-    if response.status_code != 200:
-        print("Błąd pobierania klientów:", response.text)
-        return None
-
-    for item in response.json():
-        client_data = item.get("client") if isinstance(item, dict) else None
-        if client_data and client_data.get("email") == email:
-            return client_data.get("id")
+def find_client_by_email(email: str):
+    headers = {"X-inFakt-ApiKey": INFAKT_TOKEN}
+    response = requests.get(INFAKT_API_URL, headers=headers)
+    response.raise_for_status()
+    clients = response.json()
+    for client in clients:
+        if isinstance(client, dict) and client.get("client", {}).get("email") == email:
+            return client["client"]["id"]
     return None
 
-
-def create_client(order):
-    client_payload = {
+def create_client_in_infakt(email: str, customer: dict, address: dict):
+    headers = {
+        "X-inFakt-ApiKey": INFAKT_TOKEN,
+        "Content-Type": "application/json",
+    }
+    client_data = {
         "client": {
-            "name": f"{order['billing_address']['first_name']} {order['billing_address']['last_name']}",
-            "email": order["email"],
-            "street": order["billing_address"]["address1"],
-            "city": order["billing_address"]["city"],
-            "post_code": order["billing_address"]["zip"],
-            "country": order["billing_address"]["country"],
-            "phone": order["billing_address"]["phone"],
+            "email": email,
+            "first_name": customer.get("first_name", ""),
+            "last_name": customer.get("last_name", ""),
+            "phone": customer.get("phone", ""),
+            "street": address.get("address1", ""),
+            "city": address.get("city", ""),
+            "postal_code": address.get("zip", ""),
+            "country": address.get("country", ""),
+            "client_type": "private_person"
         }
     }
-
-    response = requests.post(INFAKT_API_URL, headers=HEADERS, json=client_payload)
-    if response.status_code != 201:
-        print("Błąd tworzenia klienta:", response.text)
-        return None
-
-    return response.json()["client"]["id"]
-
+    response = requests.post(INFAKT_API_URL, headers=headers, json=client_data)
+    if response.status_code == 201:
+        return response.json()["id"]
+    print("Błąd tworzenia klienta:", response.text)
+    return None
 
 @app.post("/shopify")
 async def shopify_webhook(request: Request):
     data = await request.json()
-    email = data.get("email")
     print(">>> ODEBRANE ZAMÓWIENIE:")
     print(data)
+    email = data.get("email")
+    customer = data.get("customer", {})
+    address = data.get("shipping_address", {})
 
     client_id = find_client_by_email(email)
     if not client_id:
-        client_id = create_client(data)
-
-    if not client_id:
-        return {"error": "Nie udało się znaleźć lub utworzyć klienta."}
-
+        client_id = create_client_in_infakt(email, customer, address)
     return {"client_id": client_id}
